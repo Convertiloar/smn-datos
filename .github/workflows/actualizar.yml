@@ -1,0 +1,50 @@
+name: Actualizar alertas del SMN
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: smn
+  cancel-in-progress: false
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bajar feed y alertas del SMN
+        run: |
+          set -e
+          UA="ConvertiloPronostico/1.0 (+https://pronostico.convertilo.com.ar)"
+          curl -sS --fail --max-time 30 -A "$UA" -o feed.xml "https://ssl.smn.gob.ar/CAP/AR.php"
+          grep -q "<channel>" feed.xml
+          python3 - <<'PY'
+          import json, re, subprocess, datetime, html
+          rss = open("feed.xml", encoding="utf-8").read()
+          pref = "https://ssl.smn.gob.ar/feeds/CAP/xml_generados/"
+          links = []
+          for it in re.findall(r"<item>([\s\S]*?)</item>", rss):
+              m = re.search(r"<link>([\s\S]*?)</link>", it)
+              u = html.unescape(m.group(1).strip()) if m else ""
+              if u.startswith(pref) and u.endswith(".xml") and u not in links:
+                  links.append(u)
+          links = links[:120]
+          xmls = {}
+          for u in links:
+              r = subprocess.run(["curl", "-sS", "--fail", "--max-time", "30", "-A", "ConvertiloPronostico/1.0 (+https://pronostico.convertilo.com.ar)", u], capture_output=True, text=True)
+              if r.returncode != 0:
+                  raise SystemExit("falló una alerta: " + u)
+              xmls[u] = r.stdout
+          out = {"generado": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "fuente": "Servicio Meteorológico Nacional (CC BY 4.0)", "rss": rss, "xmls": xmls}
+          json.dump(out, open("smn.json", "w", encoding="utf-8"), ensure_ascii=False)
+          PY
+      - name: Publicar con un solo commit
+        run: |
+          set -e
+          git config user.name "smn-datos"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout --orphan datos
+          git add smn.json .github
+          git commit -qm "Alertas SMN $(date -u +%FT%TZ)"
+          git push -f origin datos:main
